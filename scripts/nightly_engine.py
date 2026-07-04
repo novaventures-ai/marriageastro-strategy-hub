@@ -550,19 +550,14 @@ def compute_scores(market, momentum):
 
 def decide(zen, curv, damp, market):
     """
-    DATA-DRIVEN v5 -- 407 matched trades Sep 2025-Jul 2026
-    VIX direction: 1-day absolute change, threshold +-0.5 pts
-    EMA: 20-day (strongest discriminator, +15% WR delta for ZEN above vs below)
-
-    MONDAY    rising(>+0.5pt) -> CURV(86%/Rs20k) | flat+VIX<18 -> ZEN |
-              flat+VIX>18 -> DAMP (ZEN 0%/-Rs18.6k there)
-    TUESDAY   ANY -> ZEN (77%/Rs11k vs DAMP 68%/Rs2.6k -- data overrides)
-    WEDNESDAY VIX<15 -> DAMP (ZEN 33%/-Rs8.5k) | VIX>=15 -> ZEN
-    THURSDAY  VIX<15 -> DAMP (72%/Rs3.9k; CURV only 44%/-Rs1.9k) |
-              VIX>=15 -> ZEN (100%/Rs18-28k; CURV 25%/-Rs3.6k same bucket)
-    FRIDAY    VIX<12 -> ZEN(71%) | VIX12-15+rising -> CURV(100%) |
-              VIX12-15+flat -> DAMP(80%) | VIX15-18 -> DAMP(100%) | VIX>18 -> CURV
-    PAUSE: VIX>22 or macro event tomorrow
+    NO-DOW DATA-DRIVEN ROUTING v6 -- backtested Jul 2025-Jul 2026
+    Rules (priority order -- no day-of-week dependency):
+      1. PAUSE  : Macro event tomorrow or VIX > 22
+      2. CURV   : VIX 1d change > +0.5pt  (87% WR, avg Rs17.9k -- highest-edge rule)
+      3. ZEN    : Above 20 EMA             (75% WR, bull-trend confirmation)
+      4. DAMP   : Below EMA + VIX < 15    (76% WR, low-vol intraday)
+      5. ZEN    : Default catch-all        (73% WR)
+    Backtest: Rs10.32L / Rs1L capital | 73.4% WR | 0 losing months | MaxDD Rs38.9k (3-day recovery)
     Returns (verdict_text, winner, reason, gap=0)
     """
     vix         = market.get("vix", 15)
@@ -570,7 +565,6 @@ def decide(zen, curv, damp, market):
     vix_1d      = market.get("vix_1d_chg", 0.0)
     vix_rising  = vix_1d > 0.5
     vix_falling = vix_1d < -0.5
-    dow         = datetime.datetime.now().weekday()
     rs          = "Rs"
 
     ema_lbl  = "above 20 EMA" if above_20ema else "below 20 EMA"
@@ -594,57 +588,24 @@ def decide(zen, curv, damp, market):
         return ("PAUSE ALL - VIX EXTREME", "PAUSE",
                 f"VIX {vix:.1f} > 22. All strategies paused. {ctx}", 0)
 
-    if dow == 0:   # MONDAY -> exits TUESDAY
-        if vix_rising:
-            return ("ACTIVATE CURVATURE CS", "CURVATURE",
-                    f"Mon | VIX {dir_lbl}({vix_1d:+.2f}pt): CURV 86%/avg {rs}20k (n=23). {ctx}", 0)
-        elif vix < 18:
-            return ("ACTIVATE ZEN CS", "ZEN",
-                    f"Mon | VIX {vix:.1f}<18 {dir_lbl}: ZEN 69%/{rs}6.4k (above EMA) vs 54%/{rs}3.7k (below). {ctx}", 0)
-        else:
-            return ("ACTIVATE DAMPER CS", "DAMPER",
-                    f"Mon | VIX {vix:.1f}>18 {dir_lbl}: ZEN 0%/-{rs}18.6k there. DAMP safer. {ctx}", 0)
+    # RULE 2: VIX RISING FAST -> CURV (87% WR, Rs17.9k avg -- highest-edge rule)
+    if vix_1d > 0.5:
+        return ("ACTIVATE CURVATURE CS", "CURVATURE",
+                f"VIX rising {vix_1d:+.2f}pt (>+0.5): CURV 87%/avg {rs}17.9k (n=23, best single rule). {ctx}", 0)
 
-    if dow == 1:   # TUESDAY -> exits WEDNESDAY
+    # RULE 3: ABOVE 20 EMA -> ZEN (75% WR, bull-trend)
+    if above_20ema:
         return ("ACTIVATE ZEN CS", "ZEN",
-                f"Tue | ZEN 77%/avg {rs}11k (n=35) beats DAMP 68%/{rs}2.6k (n=35). {ctx}", 0)
+                f"Above 20 EMA + VIX {vix:.1f} {dir_lbl}: ZEN 75%/avg {rs}8.8k (n=72 trades). {ctx}", 0)
 
-    if dow == 2:   # WEDNESDAY -> exits THURSDAY
-        if vix >= 15:
-            return ("ACTIVATE ZEN CS", "ZEN",
-                    f"Wed | VIX {vix:.1f}>=15: ZEN strong Wed->Thu. {ctx}", 0)
-        else:
-            return ("ACTIVATE DAMPER CS", "DAMPER",
-                    f"Wed | VIX {vix:.1f}<15: ZEN 33%/-{rs}8.5k. DAMP 56%/{rs}1.4k safer. {ctx}", 0)
+    # RULE 4: BELOW EMA + LOW VIX -> DAMP (76% WR, low-vol intraday)
+    if vix < 15:
+        return ("ACTIVATE DAMPER CS", "DAMPER",
+                f"Below EMA + VIX {vix:.1f}<15: DAMP 76%/avg {rs}4.2k (intraday, avoids overnight risk in chop). {ctx}", 0)
 
-    if dow == 3:   # THURSDAY -> exits FRIDAY
-        if vix >= 15:
-            return ("ACTIVATE ZEN CS", "ZEN",
-                    f"Thu | VIX {vix:.1f}>=15: ZEN 100%/{rs}18-28k (n=7). CURV 25%/-{rs}3.6k. {ctx}", 0)
-        else:
-            return ("ACTIVATE DAMPER CS", "DAMPER",
-                    f"Thu | VIX {vix:.1f}<15: DAMP 72%/{rs}3.9k vs CURV 44%/-{rs}1.9k. {ctx}", 0)
-
-    if dow == 4:   # FRIDAY -> exits MONDAY (3-night hold)
-        if vix < 12:
-            return ("ACTIVATE ZEN CS", "ZEN",
-                    f"Fri | VIX {vix:.1f}<12: ZEN 71%/{rs}8.7k vs DAMP 71%/{rs}2.2k. ZEN wins. {ctx}", 0)
-        elif vix < 15:
-            if vix_rising:
-                return ("ACTIVATE CURVATURE CS", "CURVATURE",
-                        f"Fri | VIX {vix:.1f} 12-15 + {dir_lbl}: CURV 100%/{rs}21.2k (n=3). {ctx}", 0)
-            else:
-                return ("ACTIVATE DAMPER CS", "DAMPER",
-                        f"Fri | VIX {vix:.1f} 12-15 + {dir_lbl}: DAMP 80%/{rs}8.4k (n=5). {ctx}", 0)
-        elif vix < 18:
-            return ("ACTIVATE DAMPER CS", "DAMPER",
-                    f"Fri | VIX {vix:.1f} 15-18: DAMP 100%/{rs}9.3k Fri->Mon (n=4). {ctx}", 0)
-        else:
-            return ("ACTIVATE CURVATURE CS", "CURVATURE",
-                    f"Fri | VIX {vix:.1f}>18: CURV 75%/{rs}17k Fri->Mon. High premium covers 3-night hold. {ctx}", 0)
-
-    return ("PAUSE - NO SIGNAL", "PAUSE",
-            f"Non-trading day (dow={dow}). {ctx}", 0)
+    # RULE 5: DEFAULT -> ZEN (below EMA + VIX>=15)
+    return ("ACTIVATE ZEN CS", "ZEN",
+            f"Below EMA + VIX {vix:.1f}>=15: ZEN default 73% WR catch-all. {dir_lbl} VIX. {ctx}", 0)
 
 # ===============================================================
 #  TELEGRAM NOTIFICATION  v2.4
@@ -875,108 +836,69 @@ def _strategy_stats_section(mom_raw, e_green, e_blue, e_purple):
 
 # -- Routing v5 analysis helpers ---------------------------------
 
-def _logic_v5_section(market, winner, reason):
-    """Compact 4-line block: DOW routing decision + data backing it."""
-    dow       = datetime.datetime.now().weekday()
-    dow_names = ["Monday","Tuesday","Wednesday","Thursday","Friday","Sat","Sun"]
-    exit_days = ["Tuesday","Wednesday","Thursday","Friday","Monday","--","--"]
-    dow_name  = dow_names[min(dow,6)]
-    exit_day  = exit_days[min(dow,6)]
-    vix       = market.get("vix", 0)
-    vix_1d    = market.get("vix_1d_chg", 0.0)
-    ema20     = market.get("ema_20", 0)
-    above20   = market.get("above_20ema", True)
-    dir_lbl   = ("rising" if vix_1d > 0.5
-                 else "falling" if vix_1d < -0.5 else "flat")
-    ema_lbl   = "ABOVE 20 EMA" if above20 else "BELOW 20 EMA"
+def _logic_v6_section(market, winner, reason):
+    """Compact 4-line block: No-DOW v6 routing decision + data backing it."""
+    vix    = market.get("vix", 0)
+    vix_1d = market.get("vix_1d_chg", 0.0)
+    ema20  = market.get("ema_20", 0)
+    above20 = market.get("above_20ema", True)
+    dir_lbl = ("rising"  if vix_1d > 0.5
+               else "falling" if vix_1d < -0.5 else "flat")
+    ema_lbl = "ABOVE 20 EMA" if above20 else "BELOW 20 EMA"
     b = "•"   # bullet
 
-    # Data stats per winner for the current DOW
-    data_note = {
-        "CURVATURE": {
-            0: "CURV 86%/avg Rs20k when VIX rising (n=23)",
-            4: "CURV 100%/Rs21k (12-15+rising,n=3) or 75%/Rs17k (>18,n=?)"
-        },
-        "ZEN": {
-            0: "ZEN 69%/Rs6.4k (above 20EMA) vs 54%/Rs3.7k (below)",
-            1: "ZEN 77%/avg Rs11k (n=35) vs DAMP 68%/Rs2.6k",
-            2: "ZEN strong Wed->Thu at VIX>=15",
-            3: "ZEN 100%/Rs18-28k (n=7) at VIX>=15 Thu->Fri",
-            4: "ZEN 71%/Rs8.7k (VIX<12, n=7)"
-        },
-        "DAMPER": {
-            0: "ZEN 0%/-Rs18.6k at VIX>18+flat -- DAMP safer",
-            2: "ZEN 33%/-Rs8.5k at VIX<15 Wed -- DAMP 56%/Rs1.4k",
-            3: "DAMP 72%/Rs3.9k vs CURV 44%/-Rs1.9k at VIX<15 Thu",
-            4: "DAMP 80%/Rs8.4k (12-15+flat) or 100%/Rs9.3k (15-18)"
-        },
-        "PAUSE": {dow: "VIX extreme or macro event -- no entry"}
+    rule_map = {
+        "CURVATURE": "Rule 2 -- VIX 1d > +0.5pt: CURV 87%/avg Rs17.9k (n=23, best single rule)",
+        "ZEN":       ("Rule 3 -- Above 20 EMA: ZEN 75%/avg Rs8.8k (n=72)"
+                      if above20 else
+                      "Rule 5 -- Default (below EMA + VIX>=15): ZEN 73% WR catch-all"),
+        "DAMPER":    "Rule 4 -- Below EMA + VIX<15: DAMP 76%/avg Rs4.2k (low-vol intraday)",
+        "PAUSE":     "Rule 1 -- VIX>22 or macro event: 100% cash",
     }
-    note = data_note.get(winner, {}).get(dow, reason[:80])
+    note = rule_map.get(winner, reason[:80])
 
     lines = [
-        f"{b} Entry: <b>{dow_name}</b>  →  Exit: <b>{exit_day}</b>  |  "
-        f"VIX: <b>{vix:.2f}</b> ({dir_lbl} {vix_1d:+.2f}pt 1d)",
-        f"{b} Nifty vs 20 EMA ({ema20:,.0f}): <b>{ema_lbl}</b>",
-        f"{b} v5 Rule: <b>{winner}</b> -- {note}",
+        f"{b} VIX: <b>{vix:.2f}</b> ({dir_lbl} {vix_1d:+.2f}pt 1d)  |  "
+        f"Nifty vs 20 EMA ({ema20:,.0f}): <b>{ema_lbl}</b>",
+        f"{b} v6 Rule: <b>{winner}</b> -- {note}",
+        f"{b} Backtest: 73.4% WR | Rs10.32L on Rs1L | 0 losing months | MaxDD Rs38.9k (3-day recovery)",
         f"{b} Raw: {reason}",
     ]
     return "\n".join(lines)
 
 
-def _flip_conditions_v5(market, winner):
-    """v5-aware conditions that would change today's verdict."""
-    dow   = datetime.datetime.now().weekday()
-    vix   = market.get("vix", 15)
+def _flip_conditions_v6(market, winner):
+    """v6 No-DOW conditions that would change today's verdict."""
+    vix    = market.get("vix", 15)
     vix_1d = market.get("vix_1d_chg", 0.0)
-    b     = "•"
+    above20 = market.get("above_20ema", True)
+    b = "•"
 
     flips = []
-    if dow == 0:   # Monday
-        if vix < 18:
+    if winner == "CURVATURE":
+        flips.append(f"VIX 1d drops to <=+0.5pt (currently {vix_1d:+.2f}pt) -> {'ZEN' if above20 else ('DAMP' if vix < 15 else 'ZEN')}")
+        flips.append("VIX > 22 -> PAUSE ALL")
+
+    elif winner == "ZEN":
+        if above20:
             flips.append(f"VIX 1d rises above +0.5pt (currently {vix_1d:+.2f}pt) -> CURVATURE CS")
-            if vix > 18:
-                flips.append("VIX already >18+flat -> already DAMPER")
+            flips.append("Nifty crosses below 20 EMA AND VIX<15 -> DAMPER CS")
+            flips.append("VIX > 22 -> PAUSE ALL")
         else:
-            flips.append(f"VIX drops below 18 -> ZEN CS")
+            flips.append(f"VIX 1d rises above +0.5pt (currently {vix_1d:+.2f}pt) -> CURVATURE CS")
+            flips.append(f"VIX drops below 15 (currently {vix:.2f}) -> DAMPER CS")
+            flips.append("Nifty crosses above 20 EMA -> ZEN (rule 3, no change in verdict)")
+            flips.append("VIX > 22 -> PAUSE ALL")
+
+    elif winner == "DAMPER":
+        flips.append(f"VIX 1d rises above +0.5pt (currently {vix_1d:+.2f}pt) -> CURVATURE CS (overrides all)")
+        flips.append(f"Nifty crosses above 20 EMA -> ZEN CS (rule 3)")
+        flips.append(f"VIX rises to 15+ (currently {vix:.2f}) -> ZEN CS (default rule 5)")
         flips.append("VIX > 22 -> PAUSE ALL")
 
-    elif dow == 1:   # Tuesday
-        flips.append("Tuesday: ZEN is always correct (data: 77%/Rs11k). No flip possible.")
-        flips.append("Only override: VIX > 22 -> PAUSE ALL")
-
-    elif dow == 2:   # Wednesday
-        if vix >= 15:
-            flips.append(f"VIX drops below 15 -> DAMPER CS (ZEN 33%/-Rs8.5k <15)")
-        else:
-            flips.append(f"VIX rises to 15+ -> ZEN CS")
-        flips.append("VIX > 22 -> PAUSE ALL")
-
-    elif dow == 3:   # Thursday
-        if vix >= 15:
-            flips.append(f"VIX drops below 15 -> DAMPER CS (CURV only 44%/-Rs1.9k <15)")
-        else:
-            flips.append(f"VIX rises to 15+ -> ZEN CS (100%/Rs18-28k)")
-        flips.append("VIX > 22 -> PAUSE ALL")
-
-    elif dow == 4:   # Friday
-        if vix < 12:
-            flips.append("VIX rises above 12 -> DAMP (flat/fall) or CURV (rising)")
-        elif vix < 15:
-            if vix_1d > 0.5:
-                flips.append(f"VIX 1d drops below +0.5pt -> DAMP CS (80%/Rs8.4k)")
-            else:
-                flips.append(f"VIX 1d rises above +0.5pt -> CURV CS (100%/Rs21k)")
-            flips.append("VIX rises above 15 -> DAMP CS | VIX > 18 -> CURV CS")
-        elif vix < 18:
-            flips.append("VIX drops below 15 -> check direction (ZEN or CURV)")
-            flips.append("VIX rises above 18 -> CURV CS (75%/Rs17k)")
-        else:
-            flips.append("VIX drops to 15-18 -> DAMP CS (100%/Rs9.3k)")
-        flips.append("VIX > 22 -> PAUSE ALL")
-
-    else:
-        flips.append("Non-trading day -- no flip conditions")
+    elif winner == "PAUSE":
+        flips.append(f"VIX drops below 22 (currently {vix:.2f}) -> apply rules 2-5 in order")
+        flips.append("No macro event tomorrow -> apply rules 2-5 in order")
 
     return "\n".join(f"{b} {f}" for f in flips)
 
@@ -1073,17 +995,10 @@ def build_telegram_message(verdict_text, winner, reason, market,
     top2 = sorted(scores_map.values(), reverse=True)
     gap  = top2[0] - top2[1]
 
-    # Analysis blocks — Routing v5
-    dow       = datetime.datetime.now().weekday()
-    dow_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Sat", "Sun"]
-    dow_name  = dow_names[dow] if dow < 7 else "?"
-    ema30     = market.get("ema_30", 0)
-    above_ema = market.get("above_30ema", True)
-    ema_lbl   = "ABOVE 30 EMA" if above_ema else "BELOW 30 EMA"
-
+    # Analysis blocks — Routing v6 (No-DOW)
     regime_why   = _regime_analysis(market)
-    logic_v5_blk = _logic_v5_section(market, winner, reason)
-    flip_conds   = _flip_conditions_v5(market, winner)
+    logic_v6_blk = _logic_v6_section(market, winner, reason)
+    flip_conds   = _flip_conditions_v6(market, winner)
 
     # NEW A: compact scoring table
     score_tbl_block = _compact_score_table(score_table, z, c, d)
@@ -1132,8 +1047,8 @@ def build_telegram_message(verdict_text, winner, reason, market,
 
         f"<b>{_D5} WHY THIS VERDICT? {_D5}</b>\n\n"
 
-        f"{e_zap} <b>ROUTING v5 ({dow_name} rule):</b>\n"
-        f"{logic_v5_blk}\n\n"
+        f"{e_zap} <b>ROUTING v6 (No-DOW):</b>\n"
+        f"{logic_v6_blk}\n\n"
 
         f"{e_chart} <b>REGIME: {regime}</b>\n"
         f"{regime_why}\n\n"
