@@ -852,7 +852,7 @@ def _logic_v6_section(market, winner, reason):
         "ZEN":       ("Rule 3 -- Above 20 EMA: ZEN 75%/avg Rs8.8k (n=72)"
                       if above20 else
                       "Rule 5 -- Default (below EMA + VIX>=15): ZEN 73% WR catch-all"),
-        "DAMPER":    "Rule 4 -- Below EMA + VIX<15: DAMP 76%/avg Rs4.2k (low-vol intraday)",
+        "DAMPER":    "Rule 4 -- Below EMA + VIX &lt;15: DAMP 76%/avg Rs4.2k (low-vol intraday)",
         "PAUSE":     "Rule 1 -- VIX>22 or macro event: 100% cash",
     }
     note = rule_map.get(winner, reason[:80])
@@ -882,7 +882,7 @@ def _flip_conditions_v6(market, winner):
     elif winner == "ZEN":
         if above20:
             flips.append(f"VIX 1d rises above +0.5pt (currently {vix_1d:+.2f}pt) -> CURVATURE CS")
-            flips.append("Nifty crosses below 20 EMA AND VIX<15 -> DAMPER CS")
+            flips.append("Nifty crosses below 20 EMA AND VIX &lt;15 -> DAMPER CS")
             flips.append("VIX > 22 -> PAUSE ALL")
         else:
             flips.append(f"VIX 1d rises above +0.5pt (currently {vix_1d:+.2f}pt) -> CURVATURE CS")
